@@ -22,9 +22,11 @@ layers = tf.keras.layers
 
 PRETRAIN = 'pretrain'
 FINETUNE = 'finetune'
+DECODE = 'decode'
 
 PROJECTION_OUTPUT_KEY = 'projection_outputs'
 SUPERVISED_OUTPUT_KEY = 'supervised_outputs'
+DECODER_OUT_KEY = 'decode_outputs'
 
 
 class SimCLRModel(tf.keras.Model):
@@ -34,6 +36,7 @@ class SimCLRModel(tf.keras.Model):
                backbone: tf.keras.models.Model,
                projection_head: tf.keras.layers.Layer,
                supervised_head: Optional[tf.keras.layers.Layer] = None,
+               decode_head=None,
                input_specs=layers.InputSpec(shape=[None, None, None, 3]),
                mode: str = PRETRAIN,
                backbone_trainable: bool = True,
@@ -55,6 +58,7 @@ class SimCLRModel(tf.keras.Model):
         'backbone': backbone,
         'projection_head': projection_head,
         'supervised_head': supervised_head,
+        'decode_head':decode_head,
         'input_specs': input_specs,
         'mode': mode,
         'backbone_trainable': backbone_trainable,
@@ -63,6 +67,7 @@ class SimCLRModel(tf.keras.Model):
     self._backbone = backbone
     self._projection_head = projection_head
     self._supervised_head = supervised_head
+    self._decoder=decode_head
     self._mode = mode
     self._backbone_trainable = backbone_trainable
 
@@ -80,6 +85,11 @@ class SimCLRModel(tf.keras.Model):
           inputs, num_or_size_splits=num_transforms, axis=-1)
       # (num_transforms * bsz, h, w, c)
       features = tf.concat(features_list, 0)
+    elif  self._mode == DECODE:
+      num_transforms = 6
+      features_list = tf.split(
+          inputs, num_or_size_splits=num_transforms, axis=-1)
+      features = tf.concat(features_list, 0)      
     else:
       num_transforms = 1
       features = inputs
@@ -95,8 +105,8 @@ class SimCLRModel(tf.keras.Model):
         projection_inputs, training)
 
     if self._supervised_head is not None:
-      if self._mode == PRETRAIN:
-        logging.info('Ignoring gradient from supervised outputs !')
+      if self._mode == PRETRAIN or  self._mode == DECODE:
+        # logging.info('Ignoring gradient from supervised outputs !')
         # When performing pretraining and supervised_head together, we do not
         # want information from supervised evaluation flowing back into
         # pretraining network. So we put a stop_gradient.
@@ -107,21 +117,33 @@ class SimCLRModel(tf.keras.Model):
     else:
       supervised_outputs = None
 
+    if self._mode == DECODE:
+      fl=tf.split(features,num_transforms,axis=0) 
+      fea=tf.concat(fl,axis=-1) 
+      decoder_output=self._decoder(fea) 
+      # x=features.numpy()
+      # np.save("tmp/vct"+'_'+str(cnt),x)
+      # cnt +=1
+      model_outputs.update({
+          PROJECTION_OUTPUT_KEY: projection_outputs,
+          SUPERVISED_OUTPUT_KEY: supervised_outputs,
+          DECODER_OUT_KEY:decoder_output })
+      return model_outputs
+
     model_outputs.update({
         PROJECTION_OUTPUT_KEY: projection_outputs,
         SUPERVISED_OUTPUT_KEY: supervised_outputs
     })
-
     return model_outputs
 
   @property
   def checkpoint_items(self):
     """Returns a dictionary of items to be additionally checkpointed."""
     if self._supervised_head is not None:
-      items = dict(
-          backbone=self.backbone,
-          projection_head=self.projection_head,
-          supervised_head=self.supervised_head)
+      if self.decode_head is not None:
+        items = dict( backbone=self.backbone,projection_head=self.projection_head,supervised_head=self.supervised_head,decode_head=self.decode_head)
+      else:
+        items = dict( backbone=self.backbone,projection_head=self.projection_head,supervised_head=self.supervised_head)
     else:
       items = dict(backbone=self.backbone, projection_head=self.projection_head)
     return items
@@ -133,6 +155,10 @@ class SimCLRModel(tf.keras.Model):
   @property
   def projection_head(self):
     return self._projection_head
+
+  @property
+  def decode_head(self):
+    return self._decode_head
 
   @property
   def supervised_head(self):

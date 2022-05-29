@@ -40,8 +40,8 @@ from typing import List
 
 import tensorflow as tf
 
-from official.vision.beta.projects.simclr.dataloaders import preprocess_ops as simclr_preprocess_ops
-from official.vision.beta.projects.simclr.modeling import simclr_model
+from official.vision.beta.projects.simclrRP.dataloaders import preprocess_ops as simclr_preprocess_ops
+from official.vision.beta.projects.simclrRP.modeling import simclr_model
 from official.vision.dataloaders import decoder
 from official.vision.dataloaders import parser
 from official.vision.ops import preprocess_ops
@@ -147,7 +147,7 @@ class Parser(parser.Parser):
     image = tf.image.decode_jpeg(image_bytes, channels=3)
     # This line convert the image to float 0.0 - 1.0
     image = tf.image.convert_image_dtype(image, dtype=tf.float32)
-
+    # tf.print('A_parse_one_train_image',tf.shape(image))
     if self._aug_rand_crop:
       image = simclr_preprocess_ops.random_crop_with_resize(
           image, self._output_size[0], self._output_size[1])
@@ -168,7 +168,18 @@ class Parser(parser.Parser):
     image = tf.image.resize(
         image, self._output_size, method=tf.image.ResizeMethod.BILINEAR)
     image = tf.reshape(image, [self._output_size[0], self._output_size[1], 3])
+    image = tf.clip_by_value(image, 0., 1.)
+    # Convert image to self._dtype.
+    image = tf.image.convert_image_dtype(image, self._dtype)
 
+    return image
+
+  def _parse_org(self, image_bytes):
+    image = tf.image.decode_jpeg(image_bytes, channels=3)
+    image = tf.image.convert_image_dtype(image, dtype=tf.float32)
+    image = tf.image.resize(
+        image, self._output_size, method=tf.image.ResizeMethod.BILINEAR)
+    image = tf.reshape(image, [self._output_size[0], self._output_size[1], 3])
     image = tf.clip_by_value(image, 0., 1.)
     # Convert image to self._dtype.
     image = tf.image.convert_image_dtype(image, self._dtype)
@@ -177,6 +188,7 @@ class Parser(parser.Parser):
 
   def _parse_train_data(self, decoded_tensors):
     """Parses data for training."""
+    # tf.print('_parse_train_data')
     image_bytes = decoded_tensors['image/encoded']
 
     if self._mode == simclr_model.FINETUNE:
@@ -189,7 +201,12 @@ class Parser(parser.Parser):
       for _ in range(2):
         xs.append(self._parse_one_train_image(image_bytes))
       image = tf.concat(xs, -1)
-
+    elif  self._mode == simclr_model.DECODE:
+      xs = []
+      for _ in range(6):
+        xs.append(self._parse_one_train_image(image_bytes))
+      xs.append(self._parse_org(image_bytes))
+      image = tf.concat(xs, -1)
     else:
       raise ValueError('The mode {} is not supported by the Parser.'
                        .format(self._mode))
@@ -202,24 +219,29 @@ class Parser(parser.Parser):
 
   def _parse_eval_data(self, decoded_tensors):
     """Parses data for evaluation."""
+    # tf.print('_parse_eval_data')
     image_bytes = decoded_tensors['image/encoded']
     image_shape = tf.image.extract_jpeg_shape(image_bytes)
 
-    if self._test_crop:
-      image = preprocess_ops.center_crop_image_v2(image_bytes, image_shape)
+    if  self._mode == simclr_model.DECODE:
+      xs = []
+      for _ in range(6):
+        xs.append(self._parse_one_train_image(image_bytes))
+      xs.append(self._parse_org(image_bytes))
+      image = tf.concat(xs, -1)
     else:
-      image = tf.image.decode_jpeg(image_bytes, channels=3)
-    # This line convert the image to float 0.0 - 1.0
-    image = tf.image.convert_image_dtype(image, dtype=tf.float32)
-
-    image = tf.image.resize(
-        image, self._output_size, method=tf.image.ResizeMethod.BILINEAR)
-    image = tf.reshape(image, [self._output_size[0], self._output_size[1], 3])
-
-    image = tf.clip_by_value(image, 0., 1.)
-
-    # Convert image to self._dtype.
-    image = tf.image.convert_image_dtype(image, self._dtype)
+      if self._test_crop:
+        image = preprocess_ops.center_crop_image_v2(image_bytes, image_shape)
+      else:
+        image = tf.image.decode_jpeg(image_bytes, channels=3)
+      # This line convert the image to float 0.0 - 1.0
+      image = tf.image.convert_image_dtype(image, dtype=tf.float32)
+      image = tf.image.resize(
+          image, self._output_size, method=tf.image.ResizeMethod.BILINEAR)
+      image = tf.reshape(image, [self._output_size[0], self._output_size[1], 3])
+      image = tf.clip_by_value(image, 0., 1.)
+      # Convert image to self._dtype.
+      image = tf.image.convert_image_dtype(image, self._dtype)
 
     if self._parse_label:
       label = tf.cast(decoded_tensors['image/class/label'], dtype=tf.int32)

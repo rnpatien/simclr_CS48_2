@@ -36,12 +36,15 @@ from official.core import task_factory
 from official.modeling import optimization
 from official.modeling import performance
 from official.modeling import tf_utils
-from official.vision.beta.projects.simclr.configs import simclr as exp_cfg
-from official.vision.beta.projects.simclr.dataloaders import simclr_input
-from official.vision.beta.projects.simclr.heads import simclr_head
-from official.vision.beta.projects.simclr.losses import contrastive_losses
-from official.vision.beta.projects.simclr.modeling import simclr_model
+from official.vision.beta.projects.simclrRP.configs import simclr as exp_cfg
+from official.vision.beta.projects.simclrRP.dataloaders import simclr_input
+from official.vision.beta.projects.simclrRP.heads import simclr_head
+from official.vision.beta.projects.simclrRP.losses import contrastive_losses
+from official.vision.beta.projects.simclrRP.modeling import simclr_model
 from official.vision.modeling import backbones
+
+import rpUtil
+import numpy as np
 
 OptimizationConfig = optimization.OptimizationConfig
 RuntimeConfig = config_definitions.RuntimeConfig
@@ -317,9 +320,9 @@ class SimCLRPretrainTask(base_task.Task):
         scaled_loss = optimizer.get_scaled_loss(scaled_loss)
 
     tvars = model.trainable_variables
-    logging.info('Trainable variables:')
-    for var in tvars:
-      logging.info(var.name)
+    # logging.info('Trainable variables:')
+    # for var in tvars:
+    #   logging.info(var.name)
     grads = tape.gradient(scaled_loss, tvars)
     # Scales back gradient when LossScaleOptimizer is used.
     if isinstance(optimizer, tf.keras.mixed_precision.LossScaleOptimizer):
@@ -390,7 +393,7 @@ class SimCLRFinetuneTask(base_task.Task):
           optimizer,
           use_float16=runtime_config.mixed_precision_dtype == 'float16',
           loss_scale=runtime_config.loss_scale)
-    optimizer=[0,0,optimizer]
+    # optimizer=[0,0,optimizer] #rp??
     return optimizer
 
   def build_model(self):
@@ -592,7 +595,8 @@ class SimCLRFinetuneTask(base_task.Task):
     # used.
     if isinstance(optimizer, tf.keras.mixed_precision.LossScaleOptimizer):
       grads = optimizer.get_unscaled_gradients(grads)
-    optimizer.apply_gradients(list(zip(grads, tvars)))
+    # optimizer.apply_gradients(list(zip(grads, tvars)))
+    optimizer.apply_gradients((grad, var) for (grad, var) in zip(grads, tvars) if grad is not None)
 
     logs = {self.loss: loss}
     if metrics:
@@ -632,4 +636,278 @@ class SimCLRFinetuneTask(base_task.Task):
     elif model.compiled_metrics:
       self.process_compiled_metrics(model.compiled_metrics, labels, outputs)
       logs.update({m.name: m.result() for m in model.metrics})
+    return logs
+
+@task_factory.register_task_cls(exp_cfg.SimCLRDecodeTask)
+class SimCLRDecodeTask(base_task.Task):
+  """A task for image classification."""
+
+  def create_optimizer(self,
+                       optimizer_config: OptimizationConfig,
+                       runtime_config: Optional[RuntimeConfig] = None):
+    if (optimizer_config.optimizer.type == 'lars' and
+        self.task_config.loss.l2_weight_decay > 0.0):
+      raise ValueError('The l2_weight_decay cannot be used together with lars '
+                       'optimizer. Please set it to 0.')
+
+    opt_factory = optimization.OptimizerFactory(optimizer_config)
+    optimizer = opt_factory.build_optimizer(opt_factory.build_learning_rate())
+    # Configuring optimizer when loss_scale is set in runtime config. This helps
+    # avoiding overflow/underflow for float16 computations.
+    if runtime_config and runtime_config.loss_scale:
+      optimizer = performance.configure_optimizer(
+          optimizer,
+          use_float16=runtime_config.mixed_precision_dtype == 'float16',
+          loss_scale=runtime_config.loss_scale)
+    # optimizer=[0,0,optimizer] #rp???
+    return optimizer
+
+  def build_model(self):
+    model_config = self.task_config.model
+    input_specs = tf.keras.layers.InputSpec(shape=[None] +
+                                            model_config.input_size)
+
+    l2_weight_decay = self.task_config.loss.l2_weight_decay
+    l2_regularizer = (
+        tf.keras.regularizers.l2(l2_weight_decay /
+                                 2.0) if l2_weight_decay else None)
+
+    backbone = backbones.factory.build_backbone(
+        input_specs=input_specs,
+        backbone_config=model_config.backbone,
+        norm_activation_config=model_config.norm_activation,
+        l2_regularizer=l2_regularizer)
+
+    decode_head_config = model_config.decoder_head
+    decoder = simclr_head.LgtDecoder(
+        z_dim=decode_head_config.zdim,
+        tgtimage=model_config.input_size[0])
+
+    norm_activation_config = model_config.norm_activation
+    projection_head_config = model_config.projection_head
+    projection_head = simclr_head.ProjectionHead(
+        proj_output_dim=projection_head_config.proj_output_dim,
+        num_proj_layers=projection_head_config.num_proj_layers,
+        ft_proj_idx=projection_head_config.ft_proj_idx,
+        kernel_regularizer=l2_regularizer,
+        use_sync_bn=norm_activation_config.use_sync_bn,
+        norm_momentum=norm_activation_config.norm_momentum,
+        norm_epsilon=norm_activation_config.norm_epsilon)
+
+    supervised_head_config = model_config.supervised_head
+    if supervised_head_config.zero_init:
+      s_kernel_initializer = 'zeros'
+    else:
+      s_kernel_initializer = 'random_uniform'
+    supervised_head = simclr_head.ClassificationHead(
+        num_classes=supervised_head_config.num_classes,
+        kernel_initializer=s_kernel_initializer,
+        kernel_regularizer=l2_regularizer)
+
+    model = simclr_model.SimCLRModel(
+        input_specs=input_specs,
+        backbone=backbone,
+        projection_head=projection_head,
+        supervised_head=supervised_head,
+        decode_head=decoder,
+        mode=model_config.mode,
+        backbone_trainable=model_config.backbone_trainable)
+
+    logging.info(model.get_config())
+
+    return model
+
+  def initialize(self, model: tf.keras.Model):
+    """Loading pretrained checkpoint."""
+    if not self.task_config.init_checkpoint:
+      return
+
+    ckpt_dir_or_file = self.task_config.init_checkpoint
+    if tf.io.gfile.isdir(ckpt_dir_or_file):
+      ckpt_dir_or_file = tf.train.latest_checkpoint(ckpt_dir_or_file)
+
+    # Restoring checkpoint.
+    if self.task_config.init_checkpoint_modules == 'all':
+      ckpt = tf.train.Checkpoint(**model.checkpoint_items)
+      status = ckpt.read(ckpt_dir_or_file)
+      status.expect_partial().assert_existing_objects_matched()
+    elif self.task_config.init_checkpoint_modules == 'backbone_projection':
+      ckpt = tf.train.Checkpoint(
+          backbone=model.backbone, projection_head=model.projection_head)
+      status = ckpt.read(ckpt_dir_or_file)
+      status.expect_partial().assert_existing_objects_matched()
+    elif self.task_config.init_checkpoint_modules == 'backbone':
+      ckpt = tf.train.Checkpoint(backbone=model.backbone)
+      status = ckpt.read(ckpt_dir_or_file)
+      status.expect_partial().assert_existing_objects_matched()
+    else:
+      raise ValueError(
+          "Only 'all' or 'backbone' can be used to initialize the model.")
+
+    # If the checkpoint is from pretraining, reset the following parameters
+    model.backbone_trainable = self.task_config.model.backbone_trainable
+    logging.info('Finished loading pretrained checkpoint from %s',
+                 ckpt_dir_or_file)
+
+  def build_inputs(self, params, input_context=None):
+    input_size = self.task_config.model.input_size
+
+    if params.tfds_name:
+      decoder = simclr_input.TFDSDecoder(params.decoder.decode_label)
+    else:
+      decoder = simclr_input.Decoder(params.decoder.decode_label)
+    parser = simclr_input.Parser(
+        output_size=input_size[:2],
+        parse_label=params.parser.parse_label,
+        test_crop=params.parser.test_crop,
+        mode=params.parser.mode,
+        dtype=params.dtype)
+
+    reader = input_reader.InputReader(
+        params,
+        dataset_fn=tf.data.TFRecordDataset,
+        decoder_fn=decoder.decode,
+        parser_fn=parser.parse_fn(params.is_training))
+
+    dataset = reader.read(input_context=input_context)
+
+    return dataset
+
+  def build_losses(self, labels, model_outputs, aux_losses=None):
+    orgfeatures, labels=labels
+
+    #********** contrast
+    con_losses_obj = contrastive_losses.ContrastiveLoss(
+        projection_norm=self.task_config.loss.projection_norm,
+        temperature=self.task_config.loss.temperature)
+
+    projection_outputs = model_outputs[simclr_model.PROJECTION_OUTPUT_KEY]
+    prjList= tf.split(projection_outputs, 6, 0)
+    contrast_loss=0
+    for ii in range(0,5,2):
+      cl, (contrast_logits, contrast_labels) = con_losses_obj(
+          projection1=prjList[ii], projection2=prjList[ii+1])
+      contrast_loss+= cl
+
+    contrast_accuracy = tf.equal(
+        tf.argmax(contrast_labels, axis=1), tf.argmax(contrast_logits, axis=1))
+    contrast_accuracy = tf.reduce_mean(tf.cast(contrast_accuracy, tf.float32))
+    contrast_prob = tf.nn.softmax(contrast_logits)
+    contrast_entropy = -tf.reduce_mean(
+        tf.reduce_sum(contrast_prob * tf.math.log(contrast_prob + 1e-8), -1))
+
+    losses = { 'contrast_loss': contrast_loss,'contrast_accuracy': contrast_accuracy,'contrast_entropy': contrast_entropy}
+
+  #**************** sup
+    sup_outputs = model_outputs[simclr_model.SUPERVISED_OUTPUT_KEY]
+    labels = tf.concat([labels, labels,labels, labels,labels, labels], 0) #rp??
+    losses_config = self.task_config.evaluation
+    if losses_config.one_hot:
+      sup_loss = tf.keras.losses.categorical_crossentropy( labels, sup_outputs, from_logits=True)
+    else:
+      sup_loss = tf.keras.losses.sparse_categorical_crossentropy( labels, sup_outputs, from_logits=True)
+    sup_loss = tf.reduce_mean(sup_loss)
+
+    model_loss = contrast_loss/3 + sup_loss
+    losses['supervised_loss'] = sup_loss
+
+    #*************** decode
+    decode_outputs, y = model_outputs[simclr_model.DECODER_OUT_KEY]
+    # decode1,decode2 = tf.split(decode_outputs, 2, 0)
+    # dist0=tf.reshape(dist0,(256,-1))
+    # dist1=tf.reshape(dist1,(256,-1))
+    # contrast_lossDecode, _ = con_losses_obj( projection1=dist0, projection2=dist1)
+    # rc_loss = tf.reduce_mean(tf.keras.losses.MSE(orgfeatures, decode1)) + tf.reduce_mean(tf.keras.losses.MSE(orgfeatures, decode2))
+    decode_loss = tf.reduce_mean(tf.keras.losses.MSE(orgfeatures, decode_outputs))
+    losses['decode_loss'] = decode_loss  
+
+    total_loss =  model_loss + decode_loss*50  
+ 
+    losses['total_loss'] = total_loss
+    return losses
+
+  def build_metrics(self, training=True):
+    """Gets streaming metrics for training/validation."""
+    metrics = []
+    metric_names = [
+        'total_loss', 'contrast_loss', 'contrast_accuracy', 'contrast_entropy','decode_loss'
+    ]
+    if self.task_config.model.supervised_head:
+      metric_names.extend(['supervised_loss'])
+    for name in metric_names:
+      metrics.append(tf.keras.metrics.Mean(name, dtype=tf.float32))
+    return metrics
+
+  def train_step(self, inputs, model, optimizer, metrics=None):
+    ffeatures, labels = inputs
+    features=ffeatures[:,:,:,0:6*3]
+    orgfeatures=ffeatures[:,:,:,6*3:21]
+
+    if self.task_config.evaluation.one_hot:
+      num_classes = self.task_config.model.supervised_head.num_classes
+      labels = tf.one_hot(labels, num_classes)
+
+    num_replicas = tf.distribute.get_strategy().num_replicas_in_sync
+    with tf.GradientTape() as tape:
+      outputsAll = model(features, training=True)
+      outputsAll = tf.nest.map_structure(lambda x: tf.cast(x, tf.float32), outputsAll)
+
+      labs=[orgfeatures, labels]
+      losses = self.build_losses( model_outputs=outputsAll, labels=labs, aux_losses=model.losses)
+
+      scaled_loss = losses['total_loss'] / num_replicas
+      if isinstance(optimizer, tf.keras.mixed_precision.LossScaleOptimizer):
+        scaled_loss = optimizer.get_scaled_loss(scaled_loss)
+
+    tvars = model.trainable_variables
+    # logging.info('Trainable variables:')
+    # for var in tvars:
+    #   logging.info(var.name)
+    grads = tape.gradient(scaled_loss, tvars)
+    # Scales back gradient before apply_gradients when LossScaleOptimizer is used.
+    if isinstance(optimizer, tf.keras.mixed_precision.LossScaleOptimizer):
+      grads = optimizer.get_unscaled_gradients(grads)
+    optimizer.apply_gradients(list(zip(grads, tvars)))
+    # optimizer.apply_gradients((grad, var) for (grad, var) in zip(grads, tvars) if grad is not None)
+
+    logs = {self.loss: losses['total_loss']}
+
+    for m in metrics:
+      m.update_state(losses[m.name])
+      logs.update({m.name: m.result()})
+
+    if self._saveImageActive :
+      if self._saveImage==False:
+        imagePred=outputsAll [simclr_model.DECODER_OUT_KEY][1] #rp??
+        rpUtil.printImages(imagePred,orgfeatures,self._logging_dir,fileName='train_image')
+        self._saveImage=True
+    return logs
+
+  def validation_step(self, inputs, model, metrics=None):
+    ffeatures, labels = inputs
+    features=ffeatures[:,:,:,0:6*3]
+    orgfeatures=ffeatures[:,:,:,6*3:21]
+
+    if self.task_config.evaluation.one_hot:
+      num_classes = self.task_config.model.supervised_head.num_classes
+      labels = tf.one_hot(labels, num_classes)
+
+    outputsAll = self.inference_step(features, model)
+    outputsAll = tf.nest.map_structure(lambda x: tf.cast(x, tf.float32), outputsAll)
+
+    if self._saveImageActive :
+      if self._saveImage:
+        imagePred=outputsAll [simclr_model.DECODER_OUT_KEY][1] #rp??
+        rpUtil.printImages(imagePred,orgfeatures,self._logging_dir)
+        self._saveImage=False
+
+    labs=[orgfeatures, labels]
+    losses = self.build_losses( model_outputs=outputsAll, labels=labs, aux_losses=model.losses)
+
+    logs = {self.loss: losses['total_loss']}
+
+    for m in metrics:
+      m.update_state(losses[m.name])
+      logs.update({m.name: m.result()})
+
     return logs

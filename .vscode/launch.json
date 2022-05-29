@@ -11,10 +11,10 @@
             // "program": "${file}",
             "program": "train.py",
             "console": "integratedTerminal",
-            "justMyCode": false,
-            // "args": ["--mode=train_and_eval", "--experiment=simclr_finetuning", "--config_file=configs/experiments/imagenet_simclr_finetune_gpu.yaml"]
+            "justMyCode": true,
             // "args": ["--mode=train_and_eval", "--experiment=simclr_pretraining","--model_dir=rptest1", "--config_file=configs/experiments/cifar_simclr_pretrain.yaml"]
-            "args": ["--mode=train_and_eval", "--experiment=simclr_finetuning","--model_dir=rptest2FT", "--config_file=configs/experiments/cifar_simclr_finetune.yaml"]
+            // "args": ["--mode=train_and_eval", "--experiment=simclr_finetuning","--model_dir=rptest1FT", "--config_file=configs/experiments/cifar_simclr_finetune.yaml"]
+            "args": ["--mode=train_and_eval", "--experiment=simclr_decode","--model_dir=rpRes1", "--config_file=configs/experiments/cifar_simclr_decode.yaml"]
         }
     ]
 }

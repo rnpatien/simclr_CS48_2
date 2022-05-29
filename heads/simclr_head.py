@@ -18,10 +18,11 @@ from typing import Text, Optional
 
 import tensorflow as tf
 
-from official.vision.beta.projects.simclr.modeling.layers import nn_blocks
+from official.vision.beta.projects.simclrRP.modeling.layers import nn_blocks
 
 regularizers = tf.keras.regularizers
 layers = tf.keras.layers
+from tensorflow_addons.layers import InstanceNormalization as INorm
 
 
 class ProjectionHead(tf.keras.layers.Layer):
@@ -196,3 +197,119 @@ class ClassificationHead(tf.keras.layers.Layer):
   def call(self, inputs, training=None):
     inputs = self._dense0(inputs)
     return inputs
+
+import math
+class UpConvBlock(tf.keras.layers.Layer):
+    def __init__(self, filters, kernel_size=(3,3), padding='same',name='UPConv'):
+        # super(UpConvBlock, self).__init__(name=f"UpConvBlock_{UpConvBlock.count}")
+        super(UpConvBlock, self).__init__(name=name)
+        self.forward = tf.keras.models.Sequential([tf.keras.layers.Conv2D(filters, kernel_size, 1, padding),])
+        self.forward.add(layers.LeakyReLU(0.2))
+        self.forward.add(tf.keras.layers.UpSampling2D((2,2)))
+        # self.forward = tf.keras.models.Sequential([tf.keras.layers.Conv2D(filters, kernel_size, 1, padding,activation='relu'),])
+        # self.forward.add( tf.keras.layers.Conv2DTranspose(filters, kernel_size=3, strides=2, padding='same',activation='relu'))
+        
+    def call(self, inputs):
+        return self.forward(inputs)
+
+class LgtDecoder(tf.keras.layers.Layer):
+    def __init__(self, z_dim=1024, tgtimage=32, name='decoder'):
+        super(LgtDecoder, self).__init__(name=name)
+        self.steps=int(math.log2(tgtimage))
+        self.d1=tf.keras.layers.Dense(z_dim*4, activation='relu')
+        self.d2=tf.keras.layers.Dense(z_dim, activation='relu')
+        self.us=[]
+        filt_cnt=2048 #512
+        for ii in range(self.steps):
+          self.us.append(UpConvBlock(filters=filt_cnt, kernel_size=(3,3)))  #,name=self.name+ 'up' +str(ii),name=self.name+ 'up' +str(ii)
+          filt_cnt = filt_cnt/2  
+        # self.c1=tf.keras.layers.Conv2D(filters=3, kernel_size=(3,3), strides=1, padding='same', activation='sigmoid')
+        self.c2=tf.keras.layers.Conv2D(filters=filt_cnt/2, kernel_size=(3,3), strides=1, padding='same', activation='relu')
+        self.c3=tf.keras.layers.Conv2D(filters=3, kernel_size=(3,3), strides=1, padding='same', activation='sigmoid')
+        self._config_dict = {'z_dim': z_dim, 'tgtimage': tgtimage}
+        self.layBF=None
+
+    def get_config(self) :
+      """Gets the config of this model."""
+      return self._config_dict
+
+    def call(self, inputs):
+      x=self.d1(inputs)
+      x=self.d2(x)
+      for ii in range(self.steps):
+        x=self.us[ii](x)
+      # self.layBF=x
+      x=self.c2(x)
+      x=self.c3(x)
+      # ylist= tf.split(self.layBF, 2, 0)
+      # y=tf.concat(ylist, axis=-1)
+      y=None #self.c2(self.layBF)
+      # y=self.c3(y)
+      return [x,x]
+
+class EnConvBlock(tf.keras.layers.Layer):
+    def __init__(self, depth,filters, kernel_size=(3,3), padding='same',name='EnConv'):
+        super(EnConvBlock, self).__init__(name=name)
+        self.forward = tf.keras.models.Sequential([tf.keras.layers.Conv2D(filters, (4,4), 2, padding,activation='relu',padding='same'),])
+        self.forward.add( INorm()) 
+        self.forward.add( layers.Activation('relu')) 
+
+    def call(self, inputs):
+        return self.forward(inputs)
+
+class LgtEncoder(tf.keras.layers.Layer):
+    def __init__(self,  name='encoder'):
+        super(LgtEncoder, self).__init__(name=name)
+        self.steps=5
+        nout = [   256, 128, 64, 32, 16, 8]
+        self.us=[]
+        for d in range(self.step, 1, -1):
+            tmpEncode=EnConvBlock(d, nout[d])
+            self.encodes.append(tmpEncode)
+        self._config_dict = {'step': self.step}
+
+    def get_config(self) :
+      """Gets the config of this model."""
+      return self._config_dict
+
+    def call(self, inputs):
+      res=[]
+      for ii in range(self.steps):
+        x=self.us[ii](x)
+        res.append[x]
+      return [res]
+
+# class LgtDecoderX(tf.keras.layers.Layer):
+#     def __init__(self, z_dim=1024, tgtimage=32, name='decoder'):
+#         super(LgtDecoderX, self).__init__(name=name)
+#         self.steps=int(math.log2(tgtimage))
+#         self.d1=tf.keras.layers.Dense(z_dim*4, activation='relu')
+#         self.d2=tf.keras.layers.Dense(z_dim, activation='relu')
+#         self.us=[]
+#         filt_cnt=2048 #512
+#         for ii in range(self.steps):
+#           self.us.append(UpConvBlock(filters=filt_cnt, kernel_size=(3,3)))  #,name=self.name+ 'up' +str(ii),name=self.name+ 'up' +str(ii)
+#           filt_cnt = filt_cnt/2  
+#         # self.c1=tf.keras.layers.Conv2D(filters=3, kernel_size=(3,3), strides=1, padding='same', activation='sigmoid')
+#         self.c2=tf.keras.layers.Conv2D(filters=filt_cnt/2, kernel_size=(3,3), strides=1, padding='same', activation='relu')
+#         self.c3=tf.keras.layers.Conv2D(filters=3, kernel_size=(3,3), strides=1, padding='same', activation='sigmoid')
+#         self._config_dict = {'z_dim': z_dim, 'tgtimage': tgtimage}
+#         self.layBF=None
+
+#     def get_config(self) :
+#       """Gets the config of this model."""
+#       return self._config_dict
+
+#     def call(self, inputs):
+#       x=self.d1(inputs)
+#       x=self.d2(x)
+#       for ii in range(self.steps):
+#         x=self.us[ii](x)
+#       # self.layBF=x
+#       x=self.c2(x)
+#       x=self.c3(x)
+#       # ylist= tf.split(self.layBF, 2, 0)
+#       # y=tf.concat(ylist, axis=-1)
+#       y=None #self.c2(self.layBF)
+#       # y=self.c3(y)
+#       return [x,x]

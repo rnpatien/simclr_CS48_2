@@ -1,8 +1,8 @@
 # Cifar classification.
 runtime:
-  distribution_strategy: 'mirrored'
+  distribution_strategy: 'off' #'off'mirrored
   mixed_precision_dtype: 'float16'
-  loss_scale: 'dynamic'
+  #loss_scale: 'dynamic'
   num_gpus: 1
 task:
   model:
@@ -55,7 +55,7 @@ task:
     decoder:
       decode_label: true
 trainer:
-  train_steps: 10000 #48000  # 500 epochs
+  train_steps: 48000 #48000  # 500 epochs
   validation_steps: 18  # NUM_EXAMPLES (10000) // global_batch_size
   validation_interval: 96
   steps_per_loop: 96  # NUM_EXAMPLES (50000) // global_batch_size

@@ -23,17 +23,21 @@ from official.core import task_factory
 from official.core import train_lib
 from official.core import train_utils
 from official.modeling import performance
-from official.vision.beta.projects.simclr.common import registry_imports  # pylint: disable=unused-import
+from official.vision.beta.projects.simclrRP.common import registry_imports  # pylint: disable=unused-import
 
 FLAGS = flags.FLAGS
-
+from absl import logging as absllogging
+import logging
 
 def main(_):
+  # logging.getLogger('tensorflow').setLevel(logging.ERROR)
   gin.parse_config_files_and_bindings(FLAGS.gin_file, FLAGS.gin_params)
   print(FLAGS.experiment)
   params = train_utils.parse_configuration(FLAGS)
 
   model_dir = FLAGS.model_dir
+  absllogging.get_absl_handler().use_absl_log_file('absl_logging', model_dir)
+
   if 'train' in FLAGS.mode:
     # Pure eval modes do not output yaml files. Otherwise continuous eval job
     # may race against the train job for writing the same file.
