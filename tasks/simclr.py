@@ -672,11 +672,14 @@ class SimCLRDecodeTask(base_task.Task):
         tf.keras.regularizers.l2(l2_weight_decay /
                                  2.0) if l2_weight_decay else None)
 
-    backbone = backbones.factory.build_backbone(
-        input_specs=input_specs,
-        backbone_config=model_config.backbone,
-        norm_activation_config=model_config.norm_activation,
-        l2_regularizer=l2_regularizer)
+    if model_config.backbone != 'RP':
+      backbone = backbones.factory.build_backbone(
+          input_specs=input_specs,
+          backbone_config=model_config.backbone,
+          norm_activation_config=model_config.norm_activation,
+          l2_regularizer=l2_regularizer)
+    else:
+      backbone=simclr_head.LgtEncoder()
 
     decode_head_config = model_config.decoder_head
     decoder = simclr_head.LgtDecoder(

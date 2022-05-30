@@ -23,6 +23,7 @@ from official.vision.beta.projects.simclrRP.modeling.layers import nn_blocks
 regularizers = tf.keras.regularizers
 layers = tf.keras.layers
 from tensorflow_addons.layers import InstanceNormalization as INorm
+from tensorflow.keras.layers import Conv2D
 
 
 class ProjectionHead(tf.keras.layers.Layer):
@@ -248,10 +249,10 @@ class LgtDecoder(tf.keras.layers.Layer):
       return [x,x]
 
 class EnConvBlock(tf.keras.layers.Layer):
-    def __init__(self, depth,filters, kernel_size=(3,3), padding='same',name='EnConv'):
+    def __init__(self, depth,filters,name='EnConv'):
         super(EnConvBlock, self).__init__(name=name)
-        self.forward = tf.keras.models.Sequential([tf.keras.layers.Conv2D(filters, (4,4), 2, padding,activation='relu',padding='same'),])
-        self.forward.add( INorm()) 
+        self.forward = tf.keras.models.Sequential([Conv2D(filters, (4,4),strides= 2,padding='same'),])
+        # self.forward.add( INorm()) 
         self.forward.add( layers.Activation('relu')) 
 
     def call(self, inputs):
@@ -261,23 +262,24 @@ class LgtEncoder(tf.keras.layers.Layer):
     def __init__(self,  name='encoder'):
         super(LgtEncoder, self).__init__(name=name)
         self.steps=5
-        nout = [   256, 128, 64, 32, 16, 8]
-        self.us=[]
-        for d in range(self.step, 1, -1):
+        nout = [ 0,  2048,1028, 512, 256, 128, 3]
+        self.encodes=[]
+        for d in range(self.steps, 0, -1):
             tmpEncode=EnConvBlock(d, nout[d])
             self.encodes.append(tmpEncode)
-        self._config_dict = {'step': self.step}
+        self._config_dict = {'step': self.steps}
 
     def get_config(self) :
       """Gets the config of this model."""
       return self._config_dict
 
     def call(self, inputs):
-      res=[]
+      res={}
+      x=inputs
       for ii in range(self.steps):
-        x=self.us[ii](x)
-        res.append[x]
-      return [res]
+        x=self.encodes[ii](x)
+        res[ii]=x
+      return res
 
 # class LgtDecoderX(tf.keras.layers.Layer):
 #     def __init__(self, z_dim=1024, tgtimage=32, name='decoder'):

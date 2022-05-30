@@ -8,8 +8,8 @@ task:
   model:
     mode: 'decode'
     input_size: [32, 32, 3]
-    backbone:
-      type: 'resnet'
+    backbone: 
+      type: 'resnet' #
       resnet:
         model_id: 50
     backbone_trainable: true

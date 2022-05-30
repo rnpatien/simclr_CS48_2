@@ -97,6 +97,7 @@ class SimCLRModel(tf.keras.Model):
     # Base network forward pass.
     endpoints = self._backbone(
         features, training=training and self._backbone_trainable)
+
     features = endpoints[max(endpoints.keys())]
     projection_inputs = layers.GlobalAveragePooling2D()(features)
 
